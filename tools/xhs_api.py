@@ -14,6 +14,60 @@ from conf import BASE_DIR
 from uploader.xhs_uploader.main import sign_local, beauty_print
 from xhs import XhsClient
 
+def _get_cookies_from_sources(
+    cookies_str: str = None,
+    cookie_file: str = None,
+    config_file_path: Path = None, # Changed to Path type for consistency
+    account: str = None,
+    base_dir_path: Path = None # For resolving default config path
+):
+    """
+    Attempts to retrieve cookies from various sources in a specific order.
+    1. Directly provided cookies_str.
+    2. cookie_file.
+    3. config_file_path for a specific account.
+
+    Returns:
+        str: The cookie string if found, otherwise None.
+        str: An error message if an error occurred during retrieval, otherwise None.
+    """
+    if cookies_str:
+        return cookies_str, None
+
+    if cookie_file:
+        try:
+            with open(cookie_file, 'r', encoding='utf-8') as f:
+                return f.read().strip(), None
+        except Exception as e:
+            return None, f"Failed to read cookie file '{cookie_file}': {str(e)}"
+
+    # If config_file_path is not provided, construct the default path
+    cfg_path = config_file_path
+    if not cfg_path and base_dir_path: # Ensure base_dir_path is available
+        cfg_path = base_dir_path / "uploader" / "xhs_uploader" / "accounts.ini"
+    elif not cfg_path: # If no config_file_path and no base_dir_path, cannot proceed
+        return None, "Configuration file path not provided and default path cannot be determined."
+
+
+    if cfg_path:
+        _config = configparser.RawConfigParser()
+        try:
+            if not cfg_path.exists():
+                return None, f"Config file not found: {cfg_path}"
+            _config.read(cfg_path, encoding='utf-8')
+            if account not in _config:
+                return None, f"Account '{account}' not found in config file '{cfg_path}'"
+            
+            cookies_from_config = _config[account].get('cookies')
+            if not cookies_from_config: # Check if cookies key exists and is not empty
+                return None, f"No 'cookies' found for account '{account}' in config file '{cfg_path}'"
+            return cookies_from_config, None
+        except Exception as e:
+            return None, f"Failed to read cookies for account '{account}' from config file '{cfg_path}': {str(e)}"
+    
+    return None, None # No cookies found from any source, no specific error
+
+
 def upload_video_to_xhs(
     # Required parameters matching argparse
     video_path: str,
@@ -80,29 +134,19 @@ def upload_video_to_xhs(
              return {"success": False, "error": f"Unsupported video format: {path.suffix}. Supported: .mp4, .mov, .avi, .mkv"}
 
         # Get cookies
-        _cookies = cookies_str # Prioritize directly passed cookies
+        _config_path_obj = Path(config_file) if config_file else None
+        _cookies, cookie_error = _get_cookies_from_sources(
+            cookies_str=cookies_str,
+            cookie_file=cookie_file,
+            config_file_path=_config_path_obj,
+            account=account,
+            base_dir_path=Path(BASE_DIR) # Pass BASE_DIR as a Path object
+        )
+
+        if cookie_error:
+            return {"success": False, "error": cookie_error}
         if not _cookies:
-            if cookie_file:
-                try:
-                    with open(cookie_file, 'r', encoding='utf-8') as f:
-                        _cookies = f.read().strip()
-                except Exception as e:
-                     return {"success": False, "error": f"Failed to read cookie file '{cookie_file}': {str(e)}"}
-            else:
-                _config = configparser.RawConfigParser()
-                _config_path = config_file or Path(BASE_DIR / "uploader" / "xhs_uploader" / "accounts.ini")
-                try:
-                    if not Path(_config_path).exists():
-                         return {"success": False, "error": f"Config file not found: {_config_path}"}
-                    _config.read(_config_path, encoding='utf-8')
-                    if account not in _config:
-                         return {"success": False, "error": f"Account '{account}' not found in config file '{_config_path}'"}
-                    _cookies = _config[account].get('cookies')
-                except Exception as e:
-                    return {"success": False, "error": f"Failed to read cookies for account '{account}' from config file '{_config_path}': {str(e)}"}
-        
-        if not _cookies:
-            return {"success": False, "error": "Could not obtain valid cookies."}
+            return {"success": False, "error": "Could not obtain valid cookies from any source."}
 
         # --- Initialize XHS Client ---
         xhs_client = XhsClient(_cookies, sign=sign_local, timeout=60)
