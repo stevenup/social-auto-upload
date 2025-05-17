@@ -14,6 +14,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from time import sleep
+import re
 
 # 添加项目根目录到 Python 路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -43,6 +44,8 @@ def parse_args():
     parser.add_argument("--no_sleep", action="store_true", help="上传后不休眠（默认会休眠30秒以避免风控）")
     parser.add_argument("--sleep_time", type=int, default=30, help="上传后休眠时间（秒），默认30秒")
     parser.add_argument("--batch", action="store_true", help="批量模式，遇到错误继续处理")
+    parser.add_argument("--tag_delay", type=float, default=1.0, help="标签请求之间的延迟时间（秒），默认1秒")
+    parser.add_argument("--max_tags", type=int, default=20, help="最大处理标签数量，默认20个")
     
     return parser.parse_args()
 
@@ -88,13 +91,66 @@ def validate_video_path(video_path):
     return True
 
 
+def get_topic_tags(xhs_client, tags, tag_delay=1.0, max_tags=20):
+    """获取话题标签，并添加频率控制
+    
+    Args:
+        xhs_client: XhsClient 实例
+        tags: 标签列表
+        tag_delay: 每次请求之间的延迟时间（秒）
+        max_tags: 最大处理标签数量
+        
+    Returns:
+        处理后的话题对象列表和话题名称列表
+    """
+    topics = []
+    hash_tags = []
+    
+    # 限制最大处理标签数量
+    tags_to_process = tags[:max_tags] if max_tags > 0 else tags
+    total_tags = len(tags_to_process)
+    
+    print(f"\n开始处理话题标签，共 {total_tags} 个标签")
+    
+    for idx, tag in enumerate(tags_to_process):
+        try:
+            print(f"处理标签 [{idx+1}/{total_tags}]: {tag}")
+            topic_official = xhs_client.get_suggest_topic(tag)
+            
+            if topic_official and len(topic_official) > 0:
+                topic_official[0]['type'] = 'topic'
+                topic_one = topic_official[0]
+                hash_tag_name = topic_one['name']
+                hash_tags.append(hash_tag_name)
+                topics.append(topic_one)
+                print(f"✓ 获取成功: #{hash_tag_name}[话题]#")
+            else:
+                print(f"✗ 未找到匹配话题: {tag}")
+            
+            # 请求间隔，避免风控
+            if idx < total_tags - 1 and tag_delay > 0:
+                print(f"等待 {tag_delay} 秒...")
+                sleep(tag_delay)
+                
+        except Exception as e:
+            print(f"✗ 获取话题 {tag} 失败: {e}")
+            # 发生错误后等待更长时间
+            if idx < total_tags - 1 and tag_delay > 0:
+                longer_delay = tag_delay * 2
+                print(f"发生错误，等待 {longer_delay} 秒...")
+                sleep(longer_delay)
+    
+    print(f"\n成功处理 {len(topics)}/{total_tags} 个话题标签")
+    return topics, hash_tags
+
+
 def upload_video(args):
     """上传视频"""
     # 获取cookies
     cookies = get_cookies(args)
     if not cookies:
         print("无法获取有效的cookies")
-        return False
+        return {"success": False, "error": "无法获取有效的cookies"}
     
     # 初始化客户端
     xhs_client = XhsClient(cookies, sign=sign_local, timeout=60)
@@ -105,7 +161,7 @@ def upload_video(args):
         print("Cookie验证成功")
     except Exception as e:
         print(f"Cookie验证失败: {e}")
-        return False
+        return {"success": False, "error": "Cookie验证失败"}
     
     # 准备参数
     video_path = args.video_path
@@ -116,39 +172,56 @@ def upload_video(args):
     else:
         title = args.title
     
-    # 解析标签
+    # 解析标签 - 只处理 "#标签1 #标签2 #标签3" 格式
+    tags = []
     if args.tags:
-        # 解析标签字符串为列表
-        raw_tags = args.tags.split(' ')
-        tags = []
-        for tag in raw_tags:
-            # 去除前缀#和后缀[话题]#
-            clean_tag = tag.lstrip('#').split('[')[0] if tag.startswith('#') else tag.lstrip('@')
+        # 预处理标签字符串，替换所有空白字符（包括不间断空格\xa0）为普通空格
+        normalized_tags = re.sub(r'\s+', ' ', args.tags).strip()
+        
+        # 使用正则表达式提取所有以#开头的标签
+        tag_matches = re.findall(r'#([^#\s]+)', normalized_tags)
+        
+        if not tag_matches:
+            print(f"错误: 标签格式不正确，请使用 \"#标签1 #标签2 #标签3\" 格式")
+            return {"success": False, "error": "标签格式不正确"}
+            
+        # 清理每个标签
+        for match in tag_matches:
+            clean_tag = match.strip()
+            
             if clean_tag:
                 tags.append(clean_tag)
-    else:
-        tags = []
+        
+        print(f"解析出的标签列表: {tags}")
     
-    # 获取话题标签
-    topics = []
-    for tag in tags[:3]:  # 最多处理前3个标签
-        try:
-            topic_official = xhs_client.get_suggest_topic(tag)
-            if topic_official and len(topic_official) > 0:
-                topic_official[0]['type'] = 'topic'
-                topics.append(topic_official[0])
-        except Exception as e:
-            print(f"获取话题 {tag} 失败: {e}")
+    # 获取话题标签，使用优化后的函数
+    topics, hash_tags = get_topic_tags(
+        xhs_client, 
+        tags, 
+        tag_delay=args.tag_delay,
+        max_tags=args.max_tags
+    )
 
     # 添加打印语句查看 topics 的格式
     print("\n话题列表 topics 的格式:")
     print(json.dumps(topics, ensure_ascii=False, indent=2))
     
+    # 准备话题标签字符串
+    hash_tags_str = ' ' + ' '.join(['#' + tag + '[话题]#' for tag in hash_tags])
+    
     # 准备描述
     if args.desc:
-        desc = args.desc + "\n\n\n" + args.tags
+        desc = args.desc
+        # if args.tags:
+        #     desc += "\n\n\n" + args.tags
+        if hash_tags_str.strip():
+            desc += "\n\n\n" + hash_tags_str
     else:
-        desc = title + "\n\n\n" + args.tags
+        desc = title
+        # if args.tags:
+        #     desc += "\n\n\n" + args.tags
+        if hash_tags_str.strip():
+            desc += "\n\n\n" + hash_tags_str
     
     # 准备发布时间
     post_time = None
@@ -163,6 +236,7 @@ def upload_video(args):
     print(f"准备上传视频: {video_path}")
     print(f"标题: {title}")
     print(f"标签: {args.tags}")
+    print(f"话题标签: {hash_tags_str}")
     print(f"描述: {desc}")
     if args.cover:
         print(f"封面: {args.cover}")
@@ -195,11 +269,11 @@ def upload_video(args):
                 sleep(1)
             print("\n休眠结束")
         
-        return True
+        return {"success": True, "data": note}
     
     except Exception as e:
         print(f"上传失败: {e}")
-        return False
+        return {"success": False, "error": str(e)}
 
 
 def main():
@@ -209,16 +283,21 @@ def main():
     
     # 验证视频路径
     if not validate_video_path(args.video_path):
-        sys.exit(1)
+        return {"success": False, "error": "视频路径验证失败"}
     
-    # 上传视频
-    if upload_video(args):
+    # 上传视频并返回结果
+    result = upload_video(args)
+    
+    # 打印结果但不退出
+    if result["success"]:
         print("视频上传成功!")
-        sys.exit(0)
     else:
         print("视频上传失败!")
-        sys.exit(1)
+        
+    return result
 
 
 if __name__ == "__main__":
-    main()
+    result = main()
+    # 设置退出码但仍然让调用者能访问结果
+    sys.exit(0 if result.get("success", False) else 1)
