@@ -128,7 +128,7 @@ def upload_video_to_xhs(
     *   **默认值**: `None`
     *   **示例**: `"sessionid=xxxx;userid=yyyy;..."`
 *   `silent` (bool, optional):
-    *   **描述**: 是否禁止函数内部的 `print` 输出（例如 "Cookie验证成功"、"等待 N 秒..." 等）。设置为 `True` 将抑制所有标准输出。**注意**：错误信息（如 Cookie 读取失败）会通过返回值字典的 `error` 字段返回，而不是打印。
+    *   **描述**: 是否禁止函数内部的 `print` 输出（例如 "Cookie验证成功"、"等待 N 秒..." 等）。设置为 `True` 将抑制所有标准输出。**注意**：错误信息（如 Cookie 读取失败）会通过返回值字典的 `message` 字段返回，而不是打印。
     *   **默认值**: `True` (无日志输出)
     *   **示例**: `False` (允许打印内部信息，主要用于调试)
 
@@ -148,29 +148,56 @@ def upload_video_to_xhs(
 
 ```json
 {
-  "success": True,
+  "status": 200,
+  "message": "Video uploaded successfully",
   "data": {
     "id": "笔记的唯一ID字符串", // 例如 "681342360000000023010c35"
-    "score": 分数或其他数值 // 例如 10
+    "score": "分数或其他数值" // 例如 10
     // ... 可能包含小红书 API 返回的其他字段
   }
 }
 ```
 
-*   `success`: 固定为 `True`。
-*   `data`: 包含小红书 API 成功创建笔记后返回的原始数据字典。关键字段是 `id`（笔记 ID）。
+- `status`: 200 表示成功。
+- `message`: 成功提示信息。
+- `data`: 包含小红书 API 成功创建笔记后返回的原始数据字典。关键字段是 `id`（笔记 ID）。
 
 **失败:**
 
 ```json
 {
-  "success": False,
-  "error": "描述错误的字符串信息" 
+  "status": 401,
+  "message": "Cookie validation failed: ...详细错误信息..."
+}
+```
+或
+```json
+{
+  "status": 404,
+  "message": "Video file not found or is not a file: ...文件路径..."
+}
+```
+或
+```json
+{
+  "status": 400,
+  "message": "Unsupported video format: .xxx. Supported: .mp4, .mov, .avi, .mkv"
+}
+```
+或
+```json
+{
+  "status": 500,
+  "message": "XHS API upload failed: ...详细错误信息..."
 }
 ```
 
-*   `success`: 固定为 `False`。
-*   `error`: 描述失败原因的字符串。例如 "视频文件未找到"、"Cookie验证失败"、"上传失败: [具体API错误]" 等。
+- `status`: 失败时为 400/401/404/500 等 HTTP 风格状态码：
+  - 400: 请求参数错误（如不支持的视频格式）
+  - 401: 认证错误（Cookie相关）
+  - 404: 资源不存在（文件未找到）
+  - 500: 服务器错误（API调用失败）
+- `message`: 失败原因的字符串描述。
 
 ### 调用示例
 
@@ -191,47 +218,32 @@ note_title = "周末探店记"
 note_tags = "#周末去哪儿 #咖啡探店 #日常vlog"
 note_description = "发现一家宝藏咖啡店，环境和咖啡都很赞！"
 schedule_time = "2025-02-10 12:00:00" # 定时发布
-# 可以选择直接传入 cookies 字符串
 my_cookies = "a1=xxxx; web_session=yyyy; ..." 
 
 # --- 调用函数 ---
-# 示例1：使用 cookies 字符串，并定时发布
 result = upload_video_to_xhs(
     video_path=video_file,
     title=note_title,
     tags=note_tags,
     desc=note_description,
     publish_time=schedule_time,
-    cookies_str=my_cookies, # 直接传入 cookies
-    silent=True # 保持安静，不打印日志
+    cookies_str=my_cookies,
+    silent=True
 )
 
-# 示例2：使用配置文件读取 cookies，立即私密发布
-# result = upload_video_to_xhs(
-#     video_path="/data/videos/private_test.mp4",
-#     title="私密测试视频",
-#     account="my_test_account", # 假设配置文件中有这个账号
-#     config_file="/etc/myapp/xhs_accounts.ini", # 指定配置文件路径
-#     private=True, # 设置为私密
-#     silent=False # 允许打印调试信息
-# )
-
 # --- 处理结果 ---
-if result["success"]:
+if result["status"] == 200:
     note_info = result["data"]
     note_id = note_info.get("id")
     score = note_info.get("score")
     print(f"视频上传成功！")
     print(f"  笔记 ID: {note_id}")
     print(f"  得分: {score}")
-    # 在这里可以将 note_id 保存到数据库或其他系统
     # save_note_id_to_db(note_id)
 else:
-    error_msg = result["error"]
+    error_msg = result["message"]
     print(f"视频上传失败: {error_msg}")
-    # 可以记录错误日志或进行其他错误处理
     # log_upload_error(video_file, error_msg)
-
 ```
 
 ### 注意事项
